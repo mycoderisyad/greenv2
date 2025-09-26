@@ -74,7 +74,7 @@ function logStep(title) {
 }
 
 // ====== DELAY STRATEGY ======
-const SAFE_MIN_INTERVAL_MS = 900;
+const SAFE_MIN_INTERVAL_MS = 0;
 
 function parseManualOrRange(input) {
   const parts = input.split("-").map((n) => parseInt(n.trim(), 10)).filter(n => !isNaN(n));
