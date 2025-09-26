@@ -1,7 +1,16 @@
 //quick start
-// npm install @octokit/rest simple-git jsonfile moment random readline
+// npm install @octokit/rest simple-git jsonfile moment random readline fs child_process
 // export GITHUB_TOKEN="ghp_xxx..."
 // export GITHUB_USERNAME="usernamekamu"
+//==============================================
+// Auto Add Repo (manual, random, atau list dari file .txt/.json)
+// Auto Commit (pakai random date, delay strategy manual/range/auto)
+// Auto PR
+// Auto Issue
+// Auto Star (repo sendiri)
+// Multi-Star (dari banyak akun → banyak repo)
+// Delay Strategy lengkap (manual, range, auto dengan minimal 900ms)
+//==============================================
 
 
 // ====== deps ======
@@ -21,12 +30,12 @@ const ask = (q) => new Promise((res) => rl.question(q, res));
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
 const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
-const USERNAME = process.env.GITHUB_USERNAME; // export dulu: export GITHUB_USERNAME="usernamekamu"
+const USERNAME = process.env.GITHUB_USERNAME;
 
 // ====== helpers ======
 async function ensureToken() {
   if (!process.env.GITHUB_TOKEN) {
-    throw new Error("⚠️  GITHUB_TOKEN tidak ditemukan. Jalankan: export GITHUB_TOKEN=ghp_xxx");
+    throw new Error("⚠️  GITHUB_TOKEN tidak ditemukan. export GITHUB_TOKEN=ghp_xxx");
   }
 }
 
@@ -41,12 +50,30 @@ async function getRepoInfoFromGit() {
 
   return { owner: httpsMatch[1], repo: httpsMatch[2].replace(/\.git$/i, "") };
 }
+// ====== Helper: fetch repos dari username ======
+async function fetchReposByUsername(username, { includeForks = false, includeArchived = false, sort = "updated", limit = 0 }) {
+  const client = new Octokit(); // public endpoint, tidak perlu token
+  const repos = await client.paginate(client.repos.listForUser, {
+    username,
+    per_page: 100,
+    sort,         // "updated" | "pushed" | "full_name" | "created"
+    direction: "desc",
+  });
+
+  let list = repos
+    .filter(r => (includeForks ? true : !r.fork))
+    .filter(r => (includeArchived ? true : !r.archived))
+    .map(r => `${r.owner.login}/${r.name}`);
+
+  if (limit && limit > 0) list = list.slice(0, limit);
+  return list;
+}
 
 function logStep(title) {
   console.log(`\n──────────────── ${title} ────────────────`);
 }
 
-// ==== DELAY STRATEGY ====
+// ====== DELAY STRATEGY ======
 const SAFE_MIN_INTERVAL_MS = 900;
 
 function parseManualOrRange(input) {
@@ -143,7 +170,6 @@ async function initializeAndPushRepo(repoName) {
 
 async function runAutoAddRepos() {
   const mode = (await ask("Pakai list dari file? (y/n): ")).trim().toLowerCase();
-
   let repoNames = [];
 
   if (mode === "y") {
@@ -152,7 +178,6 @@ async function runAutoAddRepos() {
       console.log("❌ File tidak ditemukan.");
       return;
     }
-
     if (filePath.endsWith(".json")) {
       repoNames = JSON.parse(fs.readFileSync(filePath, "utf-8"));
     } else {
@@ -161,30 +186,17 @@ async function runAutoAddRepos() {
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
     }
-
-    console.log(`✓ ${repoNames.length} repo akan dibuat dari file:`);
-    console.log(repoNames.join(", "));
   } else {
     const randomMode = (await ask("Pakai nama random? (y/n): ")).trim().toLowerCase();
     let baseName = "";
-
     if (randomMode === "y") {
       baseName = `auto-repo-${Date.now().toString(36)}`;
       console.log(`Base name random: ${baseName}`);
     } else {
       baseName = (await ask("Masukkan base name repo: ")).trim();
-      if (!baseName) {
-        console.log("❌ Base name tidak boleh kosong.");
-        return;
-      }
+      if (!baseName) return console.log("❌ Base name tidak boleh kosong.");
     }
-
     const count = parseInt(await ask("Berapa repo yang mau dibuat: "), 10);
-    if (isNaN(count) || count <= 0) {
-      console.log("❌ Jumlah tidak valid.");
-      return;
-    }
-
     repoNames = Array.from({ length: count }, (_, i) =>
       count === 1 ? baseName : `${baseName}-${i + 1}`
     );
@@ -193,9 +205,8 @@ async function runAutoAddRepos() {
   for (const repoName of repoNames) {
     await createRepo(repoName);
     await initializeAndPushRepo(repoName);
-    await delay(1000); // jeda aman
+    await delay(1000);
   }
-
   console.log("✓ Selesai auto add repos.");
 }
 
@@ -224,17 +235,12 @@ async function runAutoCommits() {
 
   const startDate = moment(startInput, "MM-YYYY");
   const endDate = moment(endInput, "MM-YYYY").endOf("month");
-  if (!startDate.isValid() || !endDate.isValid()) {
-    console.error("Invalid date input.");
-    return;
-  }
 
   for (let i = 0; i < commitCount; i++) {
     const date = getRandomDate(startDate, endDate);
     await markCommit(date);
     await applyPacedDelay(delayStrategy);
   }
-
   await git.push("origin", "main");
   console.log("✓ All commits pushed.");
 }
@@ -246,9 +252,7 @@ async function createPR({ owner, repo, headBranch, baseBranch, title, body }) {
 }
 
 async function runAutoPRs() {
-  await ensureToken();
   const { owner, repo } = await getRepoInfoFromGit();
-
   const baseBranch = (await ask('Base branch (default "main"): ')) || "main";
   const prCount = parseInt(await ask("Jumlah PR: "), 10);
   const delayStrategy = await getDelayStrategy(ask);
@@ -256,38 +260,22 @@ async function runAutoPRs() {
   for (let i = 1; i <= prCount; i++) {
     logStep(`PR ${i}/${prCount}`);
     const headBranch = `feature/auto-pr-${Date.now()}-${i}`;
-
-    await git.fetch("origin", baseBranch);
-    await git.checkout(baseBranch);
-    await git.pull("origin", baseBranch);
-
-    const bumpFile = "./pr-bump.txt";
-    fs.writeFileSync(bumpFile, `auto-pr ${i} at ${new Date().toISOString()}\n`);
-
+    fs.writeFileSync("./pr-bump.txt", `auto-pr ${i} at ${new Date().toISOString()}\n`);
     await git.checkoutLocalBranch(headBranch);
-    await git.add(bumpFile);
+    await git.add("./pr-bump.txt");
     await git.commit(`chore: auto PR bump ${i}`);
     await git.push("origin", headBranch);
 
-    const prUrl = await createPR({
-      owner,
-      repo,
-      headBranch,
-      baseBranch,
-      title: `Auto PR #${i}`,
-      body: `This PR was automatically created at ${new Date().toISOString()}.`,
-    });
-
+    const prUrl = await createPR({ owner, repo, headBranch, baseBranch, title: `Auto PR #${i}`, body: "Auto generated" });
     console.log(`✓ PR opened: ${prUrl}`);
+
     await git.checkout(baseBranch);
     await applyPacedDelay(delayStrategy);
   }
-  console.log("✓ Selesai membuat PR.");
 }
 
 // ====== 4) AUTO ISSUE ======
 async function runAutoIssues() {
-  await ensureToken();
   const { owner, repo } = await getRepoInfoFromGit();
   const n = parseInt(await ask("Jumlah issue: "), 10);
   const prefix = (await ask('Prefix judul (default "Auto Issue"): ')) || "Auto Issue";
@@ -298,34 +286,25 @@ async function runAutoIssues() {
     const body = `Auto generated on ${moment().format("DD-MM-YYYY HH:mm:ss")}`;
     try {
       const issue = await octokit.issues.create({ owner, repo, title, body });
-      console.log(`✓ Issue #${issue.data.number} → ${issue.data.html_url}`);
+      console.log(`✓ Issue #${issue.data.number}`);
     } catch (e) {
       console.error("x Gagal issue:", e.message);
     }
     await applyPacedDelay(delayStrategy);
   }
-  console.log("✓ Selesai membuat issues.");
 }
 
-// ====== 5) AUTO STAR ======
+// ====== 5) AUTO STAR (repo sendiri) ======
 async function runAutoStarOwnRepos() {
-  await ensureToken();
-
   const me = await octokit.users.getAuthenticated();
   const username = me.data.login;
-
-  console.log(`Akan meng-star semua repo milik: ${username}`);
-  const repos = await octokit.paginate(octokit.repos.listForAuthenticatedUser, {
-    per_page: 100,
-    visibility: "all",
-    affiliation: "owner",
-  });
+  const repos = await octokit.paginate(octokit.repos.listForAuthenticatedUser, { per_page: 100, affiliation: "owner" });
 
   for (const r of repos) {
     try {
       await octokit.activity.starRepoForAuthenticatedUser({ owner: r.owner.login, repo: r.name });
-      console.log(`⭐  ${r.full_name}`);
-      await delay(random.int(250, 900));
+      console.log(`⭐ ${r.full_name}`);
+      await delay(random.int(500, 1000));
     } catch (e) {
       console.error(`x Gagal star ${r.full_name}: ${e.message}`);
     }
@@ -333,30 +312,88 @@ async function runAutoStarOwnRepos() {
   console.log("✓ Selesai memberi star.");
 }
 
+// ====== 6) MULTI-STAR (dari banyak akun) ======
+async function runMultiStar() {
+  const mode = (await ask("Target repos dari (1) file repos.txt atau (2) username? [1/2]: ")).trim();
+
+  let repos = [];
+  if (mode === "2") {
+    const targetUser = (await ask("Masukkan username target: ")).trim();
+    const limitStr = (await ask("Batasi jumlah repo? (angka, kosong = semua): ")).trim();
+    const limit = limitStr ? parseInt(limitStr, 10) : 0;
+    const skipForks = ((await ask("Skip repos fork? (y/n) [y]: ")).trim().toLowerCase() || "y") === "y";
+    const skipArchived = ((await ask("Skip repos archived? (y/n) [y]: ")).trim().toLowerCase() || "y") === "y";
+    const sort = (await ask("Sort by (updated/pushed/full_name/created) [updated]: ")).trim() || "updated";
+
+    repos = await fetchReposByUsername(targetUser, {
+      includeForks: !skipForks,
+      includeArchived: !skipArchived,
+      sort,
+      limit,
+    });
+
+    if (repos.length === 0) {
+      console.log("❌ Tidak ada repo yang ditemukan (mungkin semua terfilter).");
+      return;
+    }
+    console.log(`✓ Target repos (${repos.length}):`);
+    console.log(repos.slice(0, 10).join(", ") + (repos.length > 10 ? " ..." : ""));
+  } else {
+    const reposFile = (await ask("Masukkan path repos.txt: ")).trim();
+    if (!fs.existsSync(reposFile)) return console.log("❌ File repos.txt tidak ditemukan.");
+    repos = fs.readFileSync(reposFile, "utf-8").split("\n").map(l => l.trim()).filter(Boolean);
+  }
+
+  const tokensFile = (await ask("Masukkan path tokens.json: ")).trim();
+  if (!fs.existsSync(tokensFile)) return console.log("❌ File tokens.json tidak ditemukan.");
+  const accounts = JSON.parse(fs.readFileSync(tokensFile, "utf-8"));
+
+  // Delay strategy
+  console.log("Atur pacing untuk ANTAR REPO (per akun):");
+  const perRepoStrategy = await getDelayStrategy(ask);
+  console.log("Atur pacing untuk ANTAR AKUN:");
+  const perAccountStrategy = await getDelayStrategy(ask);
+
+  for (const acc of accounts) {
+    const client = new Octokit({ auth: acc.token });
+    console.log(`\n-- Account: ${acc.username}`);
+    for (const full of repos) {
+      const [owner, name] = full.split("/");
+      try {
+        await client.activity.starRepoForAuthenticatedUser({ owner, repo: name });
+        console.log(`⭐ ${acc.username} → ${owner}/${name}`);
+      } catch (e) {
+        console.error(`x ${acc.username} gagal star ${full}: ${e.message}`);
+      }
+      await applyPacedDelay(perRepoStrategy);
+    }
+    await applyPacedDelay(perAccountStrategy);
+  }
+
+  console.log("✓ Multi-star selesai.");
+}
+
 // ====== MENU ======
 async function main() {
-  try {
-    logStep("Menu");
-    console.log("1) Auto Add Repo");
-    console.log("2) Auto Commit");
-    console.log("3) Auto PR");
-    console.log("4) Auto Issue");
-    console.log("5) Auto Star (semua repo sendiri)");
-    console.log("0) Keluar");
+  logStep("Menu");
+  console.log("1) Auto Add Repo");
+  console.log("2) Auto Commit");
+  console.log("3) Auto PR");
+  console.log("4) Auto Issue");
+  console.log("5) Auto Star (repo sendiri)");
+  console.log("6) Multi-Star (dari banyak akun)");
+  console.log("0) Keluar");
 
-    const choice = (await ask("Pilih operasi: ")).trim();
+  const choice = (await ask("Pilih operasi: ")).trim();
+  if (choice === "1") await runAutoAddRepos();
+  else if (choice === "2") await runAutoCommits();
+  else if (choice === "3") await runAutoPRs();
+  else if (choice === "4") await runAutoIssues();
+  else if (choice === "5") await runAutoStarOwnRepos();
+  else if (choice === "6") await runMultiStar();
+  else console.log("Bye 👋");
 
-    if (choice === "1") await runAutoAddRepos();
-    else if (choice === "2") await runAutoCommits();
-    else if (choice === "3") await runAutoPRs();
-    else if (choice === "4") await runAutoIssues();
-    else if (choice === "5") await runAutoStarOwnRepos();
-    else console.log("Bye 👋");
-  } catch (err) {
-    console.error("Error:", err.message);
-  } finally {
-    rl.close();
-  }
+  rl.close();
 }
 
 main();
